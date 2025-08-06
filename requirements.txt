@@ -1,0 +1,6 @@
+aiogram>=3.7.0
+cerebras-cloud-sdk
+python-dotenv>=1.0.1
+pydantic>=2.0
+pydantic-compat
+peewee
