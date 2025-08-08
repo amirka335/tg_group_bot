@@ -208,7 +208,8 @@ async def call_cerebras_api(prompt: str, is_qwen_command: bool = False) -> str:
 
 def escape_markdown(text: str) -> str:
     """Escape special characters for Telegram MarkdownV2."""
-    escape_chars = r'\_*[]()~`>#+-=|{}.!'
+    # Characters that need to be escaped in MarkdownV2
+    escape_chars = r'_*[]()~`>#+-=|{}.!'
     for ch in escape_chars:
         text = text.replace(ch, f'\\{ch}')
     return text
@@ -255,7 +256,21 @@ async def send_long_message(message: Message, text: str, parse_mode: ParseMode =
     
     # Если текст короче лимита, отправляем обычным способом
     if len(text) <= TELEGRAM_MESSAGE_LIMIT:
-        return await message.reply(text, parse_mode=parse_mode)
+        try:
+            return await message.reply(text, parse_mode=parse_mode)
+        except Exception as e:
+            logging.warning(f"Failed to send message with parse_mode {parse_mode}: {e}")
+            # Fallback to plain text if markdown parsing fails
+            if parse_mode == ParseMode.MARKDOWN_V2:
+                # Escape markdown characters for plain text
+                safe_text = text.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace(']', '\\]')
+                safe_text = safe_text.replace('(', '\\(').replace(')', '\\)').replace('~', '\\~').replace('`', '\\`')
+                safe_text = safe_text.replace('>', '\\>').replace('#', '\\#').replace('+', '\\+').replace('-', '\\-')
+                safe_text = safe_text.replace('=', '\\=').replace('|', '\\|').replace('{', '\\{').replace('}', '\\}')
+                safe_text = safe_text.replace('.', '\\.').replace('!', '\\!')
+                return await message.reply(safe_text, parse_mode=None)
+            else:
+                return await message.reply(text, parse_mode=None)
     
     # Если текст длиннее лимита, создаем Telegraph статью
     try:
@@ -286,11 +301,25 @@ async def send_long_message(message: Message, text: str, parse_mode: ParseMode =
     except TelegraphException as e:
         logging.error(f"Telegraph API error: {e}")
         # Если не удалось создать статью, отправляем урезанную версию сообщения
-        return await message.reply(text[:TELEGRAM_MESSAGE_LIMIT], parse_mode=parse_mode)
+        safe_text = text[:TELEGRAM_MESSAGE_LIMIT]
+        if parse_mode == ParseMode.MARKDOWN_V2:
+            safe_text = safe_text.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace(']', '\\]')
+            safe_text = safe_text.replace('(', '\\(').replace(')', '\\)').replace('~', '\\~').replace('`', '\\`')
+            safe_text = safe_text.replace('>', '\\>').replace('#', '\\#').replace('+', '\\+').replace('-', '\\-')
+            safe_text = safe_text.replace('=', '\\=').replace('|', '\\|').replace('{', '\\{').replace('}', '\\}')
+            safe_text = safe_text.replace('.', '\\.').replace('!', '\\!')
+        return await message.reply(safe_text, parse_mode=None)
     except Exception as e:
         logging.error(f"Unexpected error when creating Telegraph article: {e}")
         # Если произошла непредвиденная ошибка, отправляем урезанную версию сообщения
-        return await message.reply(text[:TELEGRAM_MESSAGE_LIMIT], parse_mode=parse_mode)
+        safe_text = text[:TELEGRAM_MESSAGE_LIMIT]
+        if parse_mode == ParseMode.MARKDOWN_V2:
+            safe_text = safe_text.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace(']', '\\]')
+            safe_text = safe_text.replace('(', '\\(').replace(')', '\\)').replace('~', '\\~').replace('`', '\\`')
+            safe_text = safe_text.replace('>', '\\>').replace('#', '\\#').replace('+', '\\+').replace('-', '\\-')
+            safe_text = safe_text.replace('=', '\\=').replace('|', '\\|').replace('{', '\\{').replace('}', '\\}')
+            safe_text = safe_text.replace('.', '\\.').replace('!', '\\!')
+        return await message.reply(safe_text, parse_mode=None)
 
 # --- Command Handlers ---
 @dp.message(Command("history"))
@@ -334,7 +363,11 @@ async def handle_history_command(message: Message):
 
         if processing_msg:
             await processing_msg.delete()
-        response_msg = await send_long_message(message, summary, parse_mode=ParseMode.MARKDOWN_V2)
+        try:
+            response_msg = await send_long_message(message, summary, parse_mode=ParseMode.MARKDOWN_V2)
+        except Exception as e:
+            logging.warning(f"MarkdownV2 parsing failed for /history, sending plain text: {e}")
+            response_msg = await send_long_message(message, summary)
         await save_message_to_db(response_msg)
 
     except ValueError:
