@@ -159,8 +159,9 @@ async def call_cerebras_api(prompt: str, is_qwen_command: bool = False) -> str:
         system_prompt_content = (
             "Ты — полезный ассистент. Отвечай на русском языке, если в запросе используется русский язык. "
             "Будь краток, по существу. "
-            "Используй только разметку MarkdownV2, поддерживаемую Telegram: **жирный**, __курсив__, `код`, ~~перечеркнутый~~, ```блок кода```, ||скрытый текст||. "
-            "Не используй HTML или другие форматы разметки. "
+            "Используй простую разметку: **жирный**, __курсив__, `код`, ~~перечеркнутый~~, ```блок кода```. "
+            "Избегай сложной разметки и специальных символов. "
+            "Не используй символы которые могут вызвать ошибки парсинга в Telegram."
         )
 
         if is_qwen_command:
@@ -185,6 +186,8 @@ async def call_cerebras_api(prompt: str, is_qwen_command: bool = False) -> str:
                 {"role": "user", "content": prompt}
             ],
             model=CEREBRAS_MODEL,
+            max_tokens=2000,
+            temperature=0.7,
         )
         response_content = chat_completion.choices[0].message.content
         logging.info(f"Raw Cerebras response: {response_content[:500]}...")
@@ -208,10 +211,7 @@ async def call_cerebras_api(prompt: str, is_qwen_command: bool = False) -> str:
 
 def escape_markdown(text: str) -> str:
     """Escape special characters for Telegram MarkdownV2."""
-    # Characters that need to be escaped in MarkdownV2
-    escape_chars = r'_*[]()~`>#+-=|{}.!'
-    for ch in escape_chars:
-        text = text.replace(ch, f'\\{ch}')
+    # Use HTML mode instead of MarkdownV2 to avoid escaping issues
     return text
 
 def convert_telegram_markup_to_html(text: str) -> str:
