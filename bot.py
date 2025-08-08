@@ -210,14 +210,22 @@ async def call_cerebras_api(prompt: str, is_qwen_command: bool = False) -> str:
 
 def escape_markdown(text: str) -> str:
     """Escape special characters for Telegram MarkdownV2."""
-    escape_chars = r'\_*[]()~`>#+-=|{}.!'
-    for ch in escape_chars:
-        text = text.replace(ch, f'\\{ch}')
+    # List of characters that need escaping in MarkdownV2
+    escape_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    
+    # First, escape backslashes to avoid double escaping
+    text = text.replace('\\', '\\\\')
+    
+    # Then escape all special characters
+    for char in escape_chars:
+        text = text.replace(char, f'\\{char}')
+    
     return text
 
 def convert_telegram_markup_to_html(text: str) -> str:
     """
     Конвертирует специфичную для Telegram разметку (похожа на Markdown) в HTML.
+    Безопасно обрабатывает код и специальные символы, предотвращая проблемы с HTML.
 
     Обрабатывает:
     - **жирный**
@@ -227,25 +235,26 @@ def convert_telegram_markup_to_html(text: str) -> str:
     - `код`
     - ||скрытый текст|| (заменяет на курсив с пометкой)
     """
+    # Сначала экранируем все HTML специальные символы, чтобы предотвратить проблемы
+    import html
+    text = html.escape(text)
+    
     # Важно обрабатывать блоки кода первыми, чтобы их содержимое не форматировалось
-    # флаг re.DOTALL позволяет точке (.) соответствовать символу новой строки
+    # Используем нежадный поиск и учитываем, что содержимое уже экранировано
     text = re.sub(r'```(.*?)```', r'<pre><code>\1</code></pre>', text, flags=re.DOTALL)
-
-    # Теперь обрабатываем остальные теги
+    
+    # Теперь обрабатываем остальные теги, работая с уже экранированным текстом
     text = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', text)
     text = re.sub(r'__(.*?)__', r'<em>\1</em>', text)
     text = re.sub(r'~~(.*?)~~', r'<s>\1</s>', text)
-    text = re.sub(r'`(.*?)`', r'<code>\1</code>', text)
-
-    # Обработка спойлера: заменяем на компромиссный вариант, т.к. в Telegra.ph нет спойлеров
+    text = re.sub(r'`([^`]+)`', r'<code>\1</code>', text)
+    
+    # Обработка спойлера: заменяем на компромиссный вариант
     text = re.sub(r'\|\|(.*?)\|\|', r'<em>[скрытый текст: \1]</em>', text)
-
-    # Заменяем переносы строк на теги <br> для корректного отображения в HTML,
-    # если они не находятся внутри <pre>
-    # (Это более сложная задача, для простоты можно использовать text.replace('\n', '<br>'))
-    # Но для большинства случаев Telegra.ph сам обрабатывает абзацы, так что это может не понадобиться.
-    # Оставим текст как есть, Telegra.ph обернет абзацы в <p>.
-
+    
+    # Заменяем переносы строк на <br> для корректного отображения
+    text = text.replace('\n', '<br>')
+    
     return text
 
 async def send_long_message(message: Message, text: str, parse_mode: ParseMode = None) -> Message:
@@ -336,7 +345,7 @@ async def handle_history_command(message: Message):
 
         if processing_msg:
             await processing_msg.delete()
-        response_msg = await send_long_message(message, summary, parse_mode=ParseMode.MARKDOWN_V2)
+        response_msg = await send_long_message(message, summary, parse_mode=ParseMode.MARKDOWN)
         await save_message_to_db(response_msg)
 
     except ValueError:
