@@ -10,6 +10,7 @@ A sophisticated Telegram bot that monitors group chats, saves message history to
 - **Flexible Message Limits**: Configure how many recent messages to analyze (1-500 messages)
 - **Database Management**: Persistent storage with proper relational structure
 - **Markdown Support**: Rich formatting in bot responses using Telegram's MarkdownV2
+- **Long Message Handling**: Automatically creates Telegraph articles for responses exceeding Telegram's 4096 character limit
 
 ## Commands
 

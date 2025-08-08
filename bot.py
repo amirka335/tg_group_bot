@@ -1,6 +1,7 @@
 import os
 import logging
 import asyncio
+import re
 from datetime import datetime
 from typing import List, Dict, Any
 
@@ -14,6 +15,8 @@ from peewee import (
     SqliteDatabase, Model, AutoField, TextField, DateTimeField, IntegerField,
     ForeignKeyField, DoesNotExist
 )
+from telegraph import Telegraph
+from telegraph.exceptions import TelegraphException
 
 # Load environment variables from .env file
 load_dotenv()
@@ -99,41 +102,50 @@ def get_chat_history_from_db(chat_id: int, limit: int) -> List[Dict[str, Any]]:
     try:
         chat_obj = Chat.get_by_id(chat_id)
         # Fetch messages ordered by date descending (newest first), then limit
-        messages = (ChatMessage
-                    .select()
-                    .where(ChatMessage.chat == chat_obj)
-                    .order_by(ChatMessage.date.desc())
-                    .limit(limit))
-        
+        messages = (
+            ChatMessage
+            .select()
+            .where(ChatMessage.chat == chat_obj)
+            .order_by(ChatMessage.date.desc())
+            .limit(limit)
+        )
+
         for msg in messages:
             sender_name = msg.first_name
             if msg.last_name:
                 sender_name += f" {msg.last_name}"
             # if msg.username: # Optional: add username
             #     sender_name += f" (@{msg.username})"
-            
+
             message_date = msg.date
             if isinstance(message_date, str):
                 try:
                     message_date = datetime.fromisoformat(message_date)
                 except ValueError:
-                    logging.warning(f"Could not parse date string: {message_date} for message_id {msg.message_id}")
+                    logging.warning(
+                        f"Could not parse date string: {message_date} for message_id {msg.message_id}"
+                    )
                     # Fallback to current time or skip, for now, let's use current time to avoid crashing
-                    message_date = datetime.now() 
-            
-            history.append({
-                "sender_name": sender_name,
-                "text": msg.text,
-                "date": message_date
-            })
-        
+                    message_date = datetime.now()
+
+            history.append(
+                {
+                    "sender_name": sender_name,
+                    "text": msg.text,
+                    "date": message_date,
+                }
+            )
+
         # Messages are fetched newest to oldest, reverse for chronological order
         return history[::-1]
     except DoesNotExist:
         logging.info(f"No chat found in DB with id: {chat_id}")
         return []
     except Exception as e:
-        logging.error(f"Error fetching chat history from DB for chat {chat_id}: {e}", exc_info=True)
+        logging.error(
+            f"Error fetching chat history from DB for chat {chat_id}: {e}",
+            exc_info=True,
+        )
         return []
 
 # --- Cerebras API Interaction ---
@@ -149,7 +161,6 @@ async def call_cerebras_api(prompt: str, is_qwen_command: bool = False) -> str:
             "Будь краток, по существу. "
             "Используй только разметку MarkdownV2, поддерживаемую Telegram: **жирный**, __курсив__, `код`, ~~перечеркнутый~~, ```блок кода```, ||скрытый текст||. "
             "Не используй HTML или другие форматы разметки. "
-            "Убедись, что вся разметка корректна для MarkdownV2: экранируй специальные символы \\, _, *, [, ], (, ), ~, `, >, #, +, -, =, |, {, }, ., !"
         )
 
         if is_qwen_command:
@@ -162,7 +173,7 @@ async def call_cerebras_api(prompt: str, is_qwen_command: bool = False) -> str:
                 "То есть решение задачи превыше информации в чате. Даже если в чате информация не полная,"
                 "то на ее основе дополняй информацию и генерирует ответ."
             )
-        else: # For /history command
+        else:  # For /history command
             system_prompt_content += (
                 "Предоставляй сводки, основываясь *только* на предоставленном контексте чата. "
                 "Не добавляй информацию, отсутствующую в чате."
@@ -177,20 +188,16 @@ async def call_cerebras_api(prompt: str, is_qwen_command: bool = False) -> str:
         )
         response_content = chat_completion.choices[0].message.content
         logging.info(f"Raw Cerebras response: {response_content[:500]}...")
-        
-        # Attempt to filter out the reasoning part for "thinking" models
+
         final_response = response_content.strip()
-        
-        # Try to split by a closing thinking tag if it exists.
-        # If no tag is found, the full response will be returned.
+
         thinking_tags = ["</think>", "</reasoning>", "<|im_end|>"]
         for tag in thinking_tags:
             if tag in final_response:
                 logging.info(f"Found thinking tag '{tag}', splitting response.")
                 final_response = final_response.split(tag, 1)[-1].strip()
-                break # Stop after the first found tag
+                break
         else:
-            # This 'else' belongs to the 'for' loop, executed if no 'break' occurred (i.e., no tag found)
             logging.info("No thinking tag found, returning the full response.")
 
         logging.info(f"Final Cerebras response: {final_response[:200]}...")
@@ -198,6 +205,92 @@ async def call_cerebras_api(prompt: str, is_qwen_command: bool = False) -> str:
     except Exception as e:
         logging.error(f"Error calling Cerebras API: {type(e).__name__} - {e}", exc_info=True)
         return "Извините, произошла ошибка при обработке вашего запроса сервисом ИИ."
+
+def escape_markdown(text: str) -> str:
+    """Escape special characters for Telegram MarkdownV2."""
+    escape_chars = r'\_*[]()~`>#+-=|{}.!'
+    for ch in escape_chars:
+        text = text.replace(ch, f'\\{ch}')
+    return text
+
+def convert_telegram_markup_to_html(text: str) -> str:
+    """
+    Конвертирует специфичную для Telegram разметку (похожа на Markdown) в HTML.
+
+    Обрабатывает:
+    - **жирный**
+    - __курсив__
+    - ~~перечеркнутый~~
+    - ```блок кода```
+    - `код`
+    - ||скрытый текст|| (заменяет на курсив с пометкой)
+    """
+    # Важно обрабатывать блоки кода первыми, чтобы их содержимое не форматировалось
+    # флаг re.DOTALL позволяет точке (.) соответствовать символу новой строки
+    text = re.sub(r'```(.*?)```', r'<pre><code>\1</code></pre>', text, flags=re.DOTALL)
+
+    # Теперь обрабатываем остальные теги
+    text = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', text)
+    text = re.sub(r'__(.*?)__', r'<em>\1</em>', text)
+    text = re.sub(r'~~(.*?)~~', r'<s>\1</s>', text)
+    text = re.sub(r'`(.*?)`', r'<code>\1</code>', text)
+
+    # Обработка спойлера: заменяем на компромиссный вариант, т.к. в Telegra.ph нет спойлеров
+    text = re.sub(r'\|\|(.*?)\|\|', r'<em>[скрытый текст: \1]</em>', text)
+
+    # Заменяем переносы строк на теги <br> для корректного отображения в HTML,
+    # если они не находятся внутри <pre>
+    # (Это более сложная задача, для простоты можно использовать text.replace('\n', '<br>'))
+    # Но для большинства случаев Telegra.ph сам обрабатывает абзацы, так что это может не понадобиться.
+    # Оставим текст как есть, Telegra.ph обернет абзацы в <p>.
+
+    return text
+
+async def send_long_message(message: Message, text: str, parse_mode: ParseMode = None) -> Message:
+    """
+    Отправляет сообщение, используя Telegraph статью, если текст превышает лимит Telegram (4096 символов).
+    """
+    # Максимальная длина сообщения в Telegram
+    TELEGRAM_MESSAGE_LIMIT = 4096
+    
+    # Если текст короче лимита, отправляем обычным способом
+    if len(text) <= TELEGRAM_MESSAGE_LIMIT:
+        return await message.reply(text, parse_mode=parse_mode)
+    
+    # Если текст длиннее лимита, создаем Telegraph статью
+    try:
+        telegraph = Telegraph()
+        # Создаем временный аккаунт
+        response = telegraph.create_account(short_name='TG_Bot_Helper')
+        access_token = response['access_token']
+        
+        client = Telegraph(access_token=access_token)
+        
+        # Конвертируем Telegram разметку в HTML
+        html_content = convert_telegram_markup_to_html(text)
+        
+        # Публикуем статью
+        page = client.create_page(
+            title="Ответ от ИИ",
+            html_content=html_content
+        )
+        
+        published_url = page['url']
+        
+        # Отправляем ссылку на статью
+        response_msg = await message.reply(
+            f"Ответ слишком длинный для отправки в Telegram. Вы можете прочитать его по ссылке: {published_url}",
+            parse_mode=None
+        )
+        return response_msg
+    except TelegraphException as e:
+        logging.error(f"Telegraph API error: {e}")
+        # Если не удалось создать статью, отправляем урезанную версию сообщения
+        return await message.reply(text[:TELEGRAM_MESSAGE_LIMIT], parse_mode=parse_mode)
+    except Exception as e:
+        logging.error(f"Unexpected error when creating Telegraph article: {e}")
+        # Если произошла непредвиденная ошибка, отправляем урезанную версию сообщения
+        return await message.reply(text[:TELEGRAM_MESSAGE_LIMIT], parse_mode=parse_mode)
 
 # --- Command Handlers ---
 @dp.message(Command("history"))
@@ -210,10 +303,9 @@ async def handle_history_command(message: Message):
             num_messages = int(parts[1])
             if num_messages <= 0 or num_messages > 500:
                 num_messages = DEFAULT_MESSAGE_COUNT
-        
+
         processing_msg = await message.reply(f"Анализирую последние {num_messages} сообщений из сохраненной истории... Это может занять некоторое время.")
-        
-        # Save the bot's processing message to database
+
         if processing_msg:
             await save_message_to_db(processing_msg)
 
@@ -234,16 +326,15 @@ async def handle_history_command(message: Message):
             f"Проанализируй следующие сообщения чата, которые идут в хронологическом порядке (сначала самые старые). "
             f"Предоставь краткую и информативную сводку последних новостей или важных обсуждений. "
             f"Сосредоточься на ключевых моментах, решениях или обновлениях. Избегай ненужных деталей и 'воды'. "
-            f"Не упоминай, что ты суммируешь чат, просто предоставь сводку напрямую на русском языке.\n\n"
+            f"Не упоминай, что ты суммируй чат, просто предоставь сводку напрямую на русском языке.\n\n"
             f"Сообщения чата:\n{formatted_history}\n\n"
             f"Выводи только финальный ответ, без своих рассуждений."
         )
-        
         summary = await call_cerebras_api(summary_prompt, is_qwen_command=False)
 
         if processing_msg:
             await processing_msg.delete()
-        response_msg = await message.reply(summary, parse_mode=ParseMode.MARKDOWN_V2)
+        response_msg = await send_long_message(message, summary, parse_mode=ParseMode.MARKDOWN_V2)
         await save_message_to_db(response_msg)
 
     except ValueError:
@@ -269,7 +360,7 @@ async def handle_qwen_command(message: Message):
     processing_msg = None
     try:
         parts = message.text.split(maxsplit=2)
-        
+
         num_messages = DEFAULT_MESSAGE_COUNT
         user_question = ""
 
@@ -286,10 +377,10 @@ async def handle_qwen_command(message: Message):
                 user_question = parts[2]
             else:
                 user_question = f"{parts[1]} {parts[2]}"
-        
+
         if not user_question:
-             await message.reply("Пожалуйста, задайте вопрос. Например: /qwen Что было решено по проекту?")
-             return
+            await message.reply("Пожалуйста, задайте вопрос. Например: /qwen Что было решено по проекту?")
+            return
 
         processing_msg = await message.reply(f"Ищу в последних {num_messages} сохраненных сообщениях ответ на ваш вопрос... Это может занять некоторое время.")
 
@@ -313,7 +404,6 @@ async def handle_qwen_command(message: Message):
             f"Вопрос пользователя: {user_question}\n\n"
             f"Выводи только финальный ответ, без своих рассуждений."
         )
-        
         answer = await call_cerebras_api(qwen_prompt, is_qwen_command=True)
 
         # Post-process the answer to extract only the final response after "Вывод:"
@@ -389,14 +479,12 @@ async def handle_qwen_command(message: Message):
 
         if processing_msg:
             await processing_msg.delete()
-        # Don't escape the text - let the AI handle markdown formatting
         try:
-            response_msg = await message.reply(answer, parse_mode=ParseMode.MARKDOWN_V2)
+            response_msg = await send_long_message(message, answer, parse_mode=ParseMode.MARKDOWN_V2)
             await save_message_to_db(response_msg)
         except Exception as e:
-            # Fallback to plain text if MarkdownV2 parsing fails
             logging.warning(f"MarkdownV2 parsing failed, sending plain text: {e}")
-            response_msg = await message.reply(answer)
+            response_msg = await send_long_message(message, answer)
             await save_message_to_db(response_msg)
 
     except ValueError:
